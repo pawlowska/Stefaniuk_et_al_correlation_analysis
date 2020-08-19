@@ -1,0 +1,201 @@
+---
+title: "data_analysis"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(data.table)
+library(Hmisc) 
+library(pheatmap)
+library(RColorBrewer)
+library(dendextend)
+```
+
+```{r read alcohol data}
+dane<-fread("alcohol_data_for_paper_5.csv")
+var_name="signal_density"
+
+save=F
+saving_dir=""
+```
+
+Make list of groups and compute correlations within group
+
+```{r }
+#split by group and reshape
+lista.danych<-lapply(split(dane, by="group_label", keep.by=FALSE), 
+                     function(x) {setDF(data.table::transpose(dcast(x, abbrev ~ case_id, value.var = var_name), make.names = "abbrev"))})
+
+#clean data: set zeros to NA and remove structures with too many zeros
+missing_thresh=3
+lista.danych <- lapply(lista.danych, 
+                       function(x) {
+                         x[x == 0] <- NA
+                         x[,which(colSums(is.na(x)) < missing_thresh)]})
+
+#remove structures that are not present in all groups
+common.regions<-Reduce(intersect, lapply(lista.danych, function(x) {colnames(x)}))
+lista.danych <- lapply(lista.danych, function(x) data.table(x[, colnames(x) %in% common.regions]))
+print(paste('Brain structures left for analysis: ', length(common.regions)))
+print(common.regions)
+
+#correlations
+lista.corr <- lapply(lista.danych, function(x) rcorr(as.matrix(x), type="pearson")$r)
+```
+
+Reorder anatomically
+```{r reorder correlations}
+group_labels<-unique(dane$group_label)
+
+#create lookup table indicating anatomical order
+lookup<-unique(dane[,c("abbrev", "category", "original_row_number")])[!is.na(category)] 
+lookup<-lookup[order(category, original_row_number)] 
+
+categories_for_labeling <- data.frame(category=lookup$category)
+row.names(categories_for_labeling)<-lookup$abbrev
+
+#reorder correlations according to anatomical order
+correlations.within.categories<-lapply(lista.corr, function(x) {
+  kolejnosc<-colnames(x)
+  kolejnosc<-kolejnosc[order(match(kolejnosc, lookup$abbrev))]
+  x[kolejnosc, kolejnosc]
+})
+```
+
+Create anatomical heatmaps
+```{r plot anatomical heatmaps, fig.width=9,fig.height=8}
+save_pheatmap_png <- function(x, filename_prefix, filename_suffix, width=1800, height=800, res = 300) {
+    filename=paste(filename_prefix, filename_suffix, ".png", sep="")
+    png(filename, width = width, height = height, res = res)
+    grid::grid.newpage()
+    grid::grid.draw(x$gtable)
+    dev.off()
+}
+
+#create heatmaps
+for(grupa in group_labels) {
+  my_heatmap<-pheatmap(correlations.within.categories[[grupa]], 
+                     cluster_cols = F, cluster_rows = F,
+                     color= colorRampPalette(rev(brewer.pal(n = 7, name =  "RdBu")))(100),
+                     border_color=NA,
+                     legend = T,
+                     breaks = seq(-1, 1, length.out = 101),
+                     legend_breaks = c(-1,0,1),
+                     annotation_row = categories_for_labeling, 
+                     cellheight=3, cellwidth = 3,
+                     show_colnames = T, show_rownames = T,
+                     fontsize = 10,
+                     fontsize_col = 2.5,fontsize_row = 2.5,
+                     main = grupa)
+
+  print(my_heatmap)
+  
+  if(save) {
+    save_pheatmap_png(my_heatmap, paste(saving_dir, grupa, sep=""), "-anatomical-order", width=2800, height=2600, res = 300)}
+}
+```
+
+We want to take a closer look at amygdala, defined as list of 8 structures (below) and plot heatmaps for the amygdala rows only
+```{r plot amygdala cluster, fig.width=10,fig.height=1.3}
+amygdala_cluster_structures=c("BLAa", "BLAp", "BLAv", "LA", "BMA", "CEA", "MEA", "IA")
+
+for(grupa in group_labels) {
+  amy_heatmap<-pheatmap(correlations.within.categories[[grupa]][amygdala_cluster_structures,], 
+                        cluster_cols = F, cluster_rows = F, 
+                        color= colorRampPalette(rev(brewer.pal(n = 7, name =  "RdBu")))(100),
+                        breaks = seq(-1, 1, length.out = 101),
+                        legend_breaks = c(-1,0,1),
+                        cellheight=3, cellwidth = 3,
+                        border_color=NA,
+                        annotation_col = categories_for_labeling, 
+                        show_colnames = T, 
+                        fontsize_col = 2.5, fontsize_row = 2.5, 
+                        fontsize=10,
+                        main = grupa)
+  
+  print(amy_heatmap)
+  
+if(save) {save_pheatmap_png(amy_heatmap, paste(saving_dir, grupa, sep=""),"-amygdala", width=3000, height=500, res = 300)}
+}
+```
+
+We also want to look at how structures cluster together according to correlations, not anatomy. For this, complete euclidian distances between rows of matrix are calculated and then grouped using the hierarchical clustering algorithm.
+```{r clustered heatmap, fig.width=8,fig.height=8}
+distances<-lapply(lista.corr, function(x) {dist(x)})
+
+generate_distances_heatmap<-function(grupa, distances) {
+  my_heatmap<-pheatmap(as.matrix(distances[[grupa]]),
+                       clustering_distance_rows=distances[[grupa]],
+                       clustering_distance_cols=distances[[grupa]],
+                       color = colorRampPalette(brewer.pal(n = 7, name =  "RdYlBu"))(100),
+                       breaks = seq(0, 20, length.out = 101), #manual scale to have all groups look the same
+                       border_color=NA,
+                       cellheight=3,
+                       cellwidth = 3,
+                       show_rownames = T, fontsize_row = 2.5, 
+                       show_colnames = T, fontsize_col = 2.5,
+                       treeheight_row = 0,
+                       treeheight_col = 90,
+                       fontsize=8,
+                       main = grupa)
+  
+}
+
+mapy<-lapply(group_labels, generate_distances_heatmap, distances=distances)
+names(mapy)<-group_labels
+drzewa<-lapply(mapy, function(x) {as.dendrogram(x$tree_row)})
+
+if(save) {
+  lapply(group_labels, function(x) {save_pheatmap_png(mapy[[x]], paste(saving_dir, x, sep=""), "-clustered", width=2650, height=2700, res = 300)})
+}
+```
+
+Finally, we analyze quantitatively the dendrogram that is the result of the clustering
+```{r generate list of heights vs clusters vectors}
+hpk<-lapply(drzewa, function(x) {heights_per_k.dendrogram(x)})
+```
+
+```{r reshape, plot and save}
+#convert to data table
+hpk_dt<-rbindlist(lapply(group_labels, function(x) {data.table(height=hpk[[x]], k=as.numeric(names(hpk[[x]])), group=x )}))
+hpk_dt[,relative_height:=height/max(height), by=group]
+
+#plot
+g<-ggplot(data=hpk_dt[relative_height>0.2], aes(x=relative_height, y=k, color=group))+ geom_line(size=1)
+print(g)
+
+hpk_wide<-dcast(hpk_dt, k ~ group, value.var = "height")
+hpk_wide_odwrotnie<-dcast(hpk_dt, height ~ group, value.var = "k")
+hpk_wide_relative<-dcast(hpk_dt, k ~ group, value.var = "relative_height")
+hpk_wide_odwrotnie_relative<-dcast(hpk_dt, relative_height ~ group, value.var = "k")
+
+if (save) {write.csv(hpk_wide_odwrotnie_relative, paste(saving_dir, "heights_rel.csv", sep=""), row.names = F)}
+```
+
+We want to measure how quickly the clusters separate by finding the number of modules af half of the tree height
+```{r}
+modules_half_height<-lapply(drzewa, function(x) {
+  cutree_1h.dendrogram(x, 0.5*get_branches_heights(x, decreasing = T)[1], order_clusters_as_data = F)})
+#save
+if (save) {
+lapply(group_labels, function(x) {
+  write.csv(modules_half_height[[x]], paste(saving_dir,x, '_modules_half_height.csv', sep=''), row.names = T)})
+}
+```
+
+
+Plot the dendrograms with color coded modules at half height - dendextend package
+```{r, fig.width=12,fig.height=6}
+paleta_kolorow=brewer.pal(9, 'Dark2')
+modules_number<-lapply(modules_half_height, function(x) {max(x)})
+lapply(group_labels, function(x) {
+    drzewa[[x]] %>%
+    set("branches_k_color", value = paleta_kolorow, k=modules_number[[x]]) %>% 
+    set("branches_lwd", 1.2) %>%
+    set("labels_cex", 0.4) %>%
+    set("labels_colors", value = paleta_kolorow, k=modules_number[[x]])%>%
+    plot(main=x)
+  })
+
+```
